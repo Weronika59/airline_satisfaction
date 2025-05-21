@@ -1,0 +1,704 @@
+---
+title: "Przewidywanie satysfakcji klientów linii lotniczej"
+author: "Weronika Nadworska"
+format: 
+  html:
+    warning: false
+    message: false
+    echo: false
+    self-contained: true
+    self-contained-math: true
+    embed-resources: true
+    lang: pl
+    toc: true
+editor: visual
+toc-location: right
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r echo=FALSE}
+library(tidyverse)
+library(kableExtra)
+library(corrplot)
+library(tidymodels)
+library(easystats)
+library(gt)
+library(gtExtras)
+library(plotrix)
+library(rstatix)
+library(caret)
+library(plotly)
+library(ggmosaic)
+library(ggrepel)
+library(kknn)
+library(bestNormalize)
+library(doParallel)
+```
+
+## Wstęp oraz cel badania
+
+Każdego dnia na całym świecie odbywa się około 100 000 lotów pasażerskich, co skutkuje podróżami około 6 milionów osób dziennie. Analizowany zbiór danych zawiera informacje pozyskane od około 100 tys. pasażerów na temat satysfakcji z odbytego lotu samolotem. W tym badaniu przeprowadzona zostanie eksploracyjna analiza danych, zaprezentowane będą wizualizacje zbioru oraz zbudowany zostanie model predykcyjnego poziomu satysfakcji z odbytego lotu.
+
+Poniżej zaprezentowano opis poszczególnych zmiennych:
+
+- `Gender`: płeć pasażerów (`Female`, `Male`)
+
+- `Customer Type`: typ klienta (`Loyal customer`, `disloyal Customer`)
+
+- `Age`: wiek pasażera
+
+- `Type of Travel`: powód lotu pasażera (`Personal travel`, `Business travel`)
+
+- `Class`: klasa w samolocie podczas lotu pasażera (`Business`, `Eco`, `Eco Plus`)
+
+- `Flight distance`: przebyty dystans podczas podróży
+
+- `Inflight wifi service`: poziom zadowolenia z usługi wifi podczas lotu (0 - nie dotyczy ;1 - 5)
+
+- `Departure/Arrival time convenient`: poziom zadowolenia z dogodnego czasu odlotu/przylotu (1 - 5)
+
+- `Ease of Online booking`: poziom zadowolenia z rezerwacji online (1 - 5)
+
+- `Gate location`: poziom zadowolenia z lokalizacji bramy (1 - 5)
+
+- `Food and drink`: poziom zadowolenia z jedzenia oraz picia (1 - 5)
+
+- `Online boarding`: poziom zadowolenia z odprawy online (1 - 5)
+
+- `Seat comfort`: poziom zadowolenia z komfortu siedzenia (1 - 5)
+
+- `Inflight entertainment`: poziom zadowolenia z rozrywki pokładowej (1 - 5)
+
+- `On-board service`: poziom zadowolenia z usług pokładowych (1 - 5)
+
+- `Leg room service`: poziom zadowolenia z obsługi pokoju Leg (1`- 5)
+
+- `Baggage handling`: poziom zadowolenia z obsługi bagażu (1 - 5)
+
+- `Check-in service`: poziom zadowolenia z usługi odprawy (1 - 5)
+
+- `Inflight service`: poziom zadowolenia z obsługi podczas lotu (1 - 5)
+
+- `Cleanliness`: poziom zadowolenia z czystości (1 - 5)
+
+- `Departure Delay in Minutes`: minuty opóźnienia podczas odlotu
+
+- `Arrival Delay in Minutes`: minuty opóźnienia po przylocie
+
+- `satisfaction`: poziom zadowolenia z linii lotniczych (`satisfied`, `neutral or dissatisfied`)
+
+## Preprocessing
+
+### Opis zbioru badawczego
+
+```{r}
+dane <- read.csv("dane_konkurs.csv", sep = ",", na.strings = c("N/A","NA"))
+```
+
+Wstępna struktura danych przedstawia się następująco:
+
+```{r}
+str(dane)
+```
+
+Dane zawierają zatem 103904 obserwacji, które opisuje 26 zmiennych. Widoczne są zmienne `X.1`, `X` oraz `id`, które są indeksami wierszy. Wyminienione 3 kolumny zostaną usunięte ze zbioru, ponieważ nie wnoszą one żadnych informacji nt. danych, a format `data.frame` w `R` automatycznie indeksuje wiersze.
+
+```{r}
+dane <- dane[,-c(1:3)]
+```
+
+Dodatkowo, dostrzec można również zmienne zawierające ciągi znaków, które są zakodowane jako typ `char` (znakowy), co jest oczywiście logiczne, jednak każda z tych zmiennych ma swoje unikalne kategorie (wnioskując z opisu zmiennych), dlatego ich typ zostanie zmieniony na `factor` (kategoryczny). Poza tym, w dalszych etapach zakodowanie ich w ten sposób znacząco ułatwi analizę. Są to zmienne: `Gender`, `Customer.Type`, `Type.of.Travel`, `satisfaction` oraz `Class`.
+
+```{r}
+dane$Gender <- ifelse(dane$Gender=="Male", 0, 1)
+dane$Customer.Type <- ifelse(dane$Customer.Type=="Loyal Customer", 1, 0)
+dane$Type.of.Travel <- ifelse(dane$Type.of.Travel=="Personal Travel", 0, 1)
+dane$satisfaction <- ifelse(dane$satisfaction=="satisfied", 1, 0)
+dane$Class <- ifelse(dane$Class=="Eco", 1, ifelse(dane$Class=="Eco Plus", 2, 3))
+```
+
+Zatem zmienna `Gender` ma poziomy: 1 - *Female*, 0 - *Male*, `Customer.Type` : 0 - *disloyal Customer*, 1 - *Loyal Customer*, `Type.of.Travel`: 1 - *Business travel*, 0 - *Personal Travel*, `Class`: 1 - *Eco*, 2 - *Eco Plus*, 3 - *Business*, `satisfaction`: 0 - *neutral or dissatisfied*, 1 - *satisfied*.
+
+Zmiennymi numerycznymi w tym zbiorze danych są: `Age`, `Flight.Distance`, `Departure.Delay.in.Minutes`, `Arrival.Delay.in.Minutes`. Pozostałe zostaną zakodowane jako kategoryczne.
+
+```{r}
+dane[,c(1:2,4:5,7:20,23)] <- apply(X = dane[,c(1:2,4:5,7:20,23)], MARGIN = 2, FUN = factor)
+for(i in 1:ncol(dane)){
+  ifelse(is.character(dane[,i])==T, dane[,i] <- as.factor(dane[,i]), dane[,i] <- dane[,i])
+}
+```
+
+#### Statystyki opisowe
+
+Poniżej zostały przedstawione podstawowe statystyki opisowe dla zmiennych numerycznych.
+
+```{r}
+options(knitr.kable.NA=0)
+pods <- sub(".*:", "",summary(dane[,c(3,6,21:22)])) 
+rownames(pods) <- c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.", "NA's")
+pods |> kable() |> kable_styling(full_width = F, bootstrap_options  = "striped")
+```
+
+**Wnioski:**
+
+-   Najmłodszy pasażer w tym zbiorze danych miał 7 lat, a najstarszy 85, jednak średnia oraz mediana wieku wynoszą około 40 lat. Ich wartości są do siebie bardzo zbliżone, co może wstępnie świadczyć o braku asymetrii rozkładu tej zmiennej.
+
+-   Loty zwykle odbywały się na dystans ponad 1000 kilometrów. 75% wszystkich lotów nie przekroczyło dystansu 1741 km. Odbyły się jednak loty, dla których miejsce docelowe było znacznie bardziej oddalone - wartość maksymalna wskazuje na dystans niemal 5 tys. kilometrów. Świadczy to także dodatkowo o asymetrii rozkładu tej zmiennej.
+
+-   Dla zmiennych dotyczących opóźnień lotów, zwykle typowe wartości wynosiły 0 - opóźnienia w lotach nie występowały. 75% analizowanych lotów miało opóźnienie nie przekraczające 13 minut. Wartości maksymalne dla tych zmiennych świadczą jednak o występujących tu wartościach nietypowych - był co najmniej jeden lot, którego opóxnienie przekraczało 1500 minut.
+
+-   Na podstawie powyższej tabeli, można także dostrzec, że każda ze zmiennych numerycznych posiada braki danych, których identyfikacja oraz imputacja będzie przeprowadzona w kolejnym etapie.
+
+#### Liczby wystąpień poszczególnych poziomów dla zmiennych kategorycznych
+
+Dla zmiennych kategorycznych prezentujemy ich możliwe poziomy, oraz liczby wystąpień każdego poziomu:
+
+```{r}
+options(knitr.kable.NA='')
+summary(dane[,c(1:2,4:5,7:20,23)]) |> kable() |> kable_styling(full_width = T, bootstrap_options  = "striped")
+```
+
+Zmienne dotyczące satysfakcji z lotu mają 5 poziomów. Pozostałe, dotyczące samych pasazerów, zwykle 2-3 poziomy. Dla każdej zmiennej, poza `satisfaction`, występują braki danych.
+
+### Braki danych
+
+Liczba braków danych w każdej z kolumn:
+
+```{r}
+colSums(is.na(dane))
+sum(is.na(dane))
+```
+
+W niemal wszystkich kolumnach występuje około 400 braków danych. Najwięcej ich występuje w zmiennej `Arrival.Delay.in.Munutes`. Jedyna zmienna bez braków to `satisfaction`. W całym zbiorze danych braki stanowią 9819 przypadków.
+
+Wyświetlona zostanie teraz liczba niekompletnych wierszy w całym zbiorze (co najmniej jedna brakująca wartość).
+
+```{r}
+nrow(dane[!complete.cases(dane),])
+```
+
+Takich wierszy jest 9591.
+
+Usunięcie niemal dziesięcu tysięcy ze zbioru uważam za złą praktykę. Każdy z nich zawiera pewne informacje o pasażerach, które są cenne w analizie. Posatram się je zatem uzupełnić, stosując odpowiednią technikę.
+
+Przykładowe sposoby imputacji braków danych to imputacja średnią, medianą, elementem najczęściej występujacym lub metodą $k$-najbliższych sąsiadów.
+
+Przed zdecydowaniem się na konkretną metodę imputacji, przyjrzę się zależnościom między zmiennymi oraz zbadam ich rozkłady.
+
+```{r echo=FALSE}
+mydata.cor = cor(dane[,c(3,6,21:22)], use = "na.or.complete")
+corrplot(mydata.cor, tl.cex = 0.6, title = "Macierz korelacji zmiennych numerycznych")
+```
+
+Na podstawie widocznej wyżej macierzy korelacji, warto zauważyć silną korelację pomiędzy zmienną `Arrival.Delay.in.Minutes` oraz `Departure.Delay.in.Minutes`. Jest to korelacja naturalna, ponieważ oczywiste jest, że opóźnienie wylotu samolotu związane jest z opóźnienniem jego przylotu, jednak ostatecznie w modelowaniu warto uwzględnić tylko jedną z nich, aby nie przekazywać nadmiarowych informacji.
+
+```{r}
+mydata.cor2 = cor(apply(dane[,c(1:2,4:5,7:20,23)], 2, as.numeric), use = "na.or.complete", method = "spearman")
+corrplot(mydata.cor2, tl.cex = 0.6, title = "Macierz korelacji zmiennych kategorycznych")
+```
+
+Dla zmiennych kategorycznych widoczne są silne korelacje pomiędzy zmiennymi `Cleanliness` i `Seat.comfort` oraz `Inflight.enternainment`, a także silna korelacja pomiędzy zmiennymi `Ease.of.Online.booking` i `Inflight.wifi.service`. Zmienna wynikowa `safisfaction` najsilniejszą korelację ma ze zmiennymi `Class` oraz `Online.boarding`, z pozostałymi zmiennymi ma ona słabe korelacje.
+
+Na przyszłość można rozszerzyć to badanie o przeprowadzenie metody PCA dla wysokoskorelowanych par zmiennych.
+
+### Rozkłady zmiennych
+
+Poniżej zaprezentowano rozkłady zmiennych numerycznych oraz kategorycznych.
+
+```{r echo=FALSE}
+dane |> select(c("Age", "Flight.Distance", "Departure.Delay.in.Minutes", "Arrival.Delay.in.Minutes")) |> 
+  pivot_longer(cols = everything()) |> 
+  ggplot(aes(value, fill = name)) +
+  geom_histogram(bins = 15, color = "white")+
+  facet_wrap(~name, scales = "free")+
+  ggtitle(label = "Rozkłady zmiennych numerycznych w zbiorze danych")+
+  xlab("Wartość")+
+  ylab("Liczebność")+
+  theme(legend.position = "none")
+
+dane |> select(-c("Age", "Flight.Distance", "Departure.Delay.in.Minutes", "Arrival.Delay.in.Minutes")) |> 
+  pivot_longer(cols = everything()) |> 
+  ggplot(aes(value, fill = name)) +
+  geom_bar()+
+  facet_wrap(~name, scales = "free", ncol=4)+
+  ggtitle(label = "Rozkłady zmiennych kategorycznych w zbiorze danych")+
+  xlab("Poziom")+
+  ylab("Liczebność")+
+  theme(legend.position = "none")
+```
+
+Na podstawie powyższych wykresów wnioskujemy, że:
+
+-   płeć pasażerów jest zbalansowana, co oznacza, że liczebność kobiet i mężczyzn jest bardzo podobna,
+
+-   widoczne jest niezbalansowanie zmiennych `Customer.Type`, `Type.of.Travel` oraz `Class`,
+
+-   zmienna `satisfaction` nie jest zbalansowana, ale też nie ma znaczącej różnicy pomiędzy liczebnością pasażerów usatysfakcjonowanych, a neutralnie- lub nieusatysfakcjonowanych,
+
+-   widoczna jest symetria rozkładu zmiennej `Age` - jest on zbliżony do rozkładu normalnego - zostało to także wstępnie przewidziane wcześniej, na etapie statystyk opisowych,
+
+-   widoczna jest prawostronna asymetria rozkładu zmiennych `Arrival.Deyal.in.Minutes`, `Departure.Delay.in.Minutes` oraz `Flight.Distance`,
+
+-   widoczna jest lewostronna asymetria rozkładów zmiennych `Arrival.time.convenient`, `Food.and.drink`, `Online.borading`, `Seat.comfort` , `Inflight.entertainment`, `On.board.service`, `Leg.room.service`, `Baggage.handling`, `Checkin.service`, `Inflight.service` oraz `Cleanliness`,
+
+-   widoczne są także wartości odstające (szczególnie dla zmiennej `Customer.Type`).
+
+Ze względu na asymetrię rozkładów zmiennych ilościowych, odrzucam dla nich imputację metodą najczęściej występującej wartości. Zastosuję dla nich dwie metody imputacji - $k$-najbliższych sąsiadów (tu 5) oraz zastępowanie braków danych medianą (później przetestuję wyniki modelu na zbiorach z alternatywnymi sposobami imputacji danych celem porównania). Do zmiennych jakościowych zastosuję uzupełnianie braków danych najczęściej występującą wartością.
+
+```{r}
+#kNN dla zm. numerycznych 
+dane2 <- dane 
+dane2 <- DMwR2::knnImputation(dane2[,c(3,6,21,22)], k=5, scale = T, meth='pmm')  
+
+#najczesciej wyst. wartosc dla zmiennych jakosciowych 
+#table(dane$Gender) #1 
+dane[is.na(dane$Gender)==T,]$Gender <- 1 
+#table(dane$Customer.Type) #1 
+dane[is.na(dane$Customer.Type)==T,]$Customer.Type <- 1 
+#table(dane$Type.of.Travel) #1 
+dane[is.na(dane$Type.of.Travel)==T,]$Type.of.Travel <- 1 
+#table(dane$Class) #3 
+dane[is.na(dane$Class)==T,]$Class <- 3 
+#table(dane$Inflight.wifi.service) #3 
+dane[is.na(dane$Inflight.wifi.service)==T,]$Inflight.wifi.service <- 3 
+#table(dane$Departure.Arrival.time.convenient) #4 
+dane[is.na(dane$Departure.Arrival.time.convenient)==T,]$Departure.Arrival.time.convenient <- 4 
+#table(dane$Ease.of.Online.booking) #3 
+dane[is.na(dane$Ease.of.Online.booking)==T,]$Ease.of.Online.booking <- 3 
+#table(dane$Gate.location) #3 
+dane[is.na(dane$Gate.location)==T,]$Gate.location <- 3 
+#table(dane$Food.and.drink) #4 
+dane[is.na(dane$Food.and.drink)==T,]$Food.and.drink <- 4 
+#table(dane$Online.boarding) #4 
+dane[is.na(dane$Online.boarding)==T,]$Online.boarding <- 4 
+#table(dane$Seat.comfort) #4 
+dane[is.na(dane$Seat.comfort)==T,]$Seat.comfort <- 4 
+#table(dane$Inflight.entertainment) #4 
+dane[is.na(dane$Inflight.entertainment)==T,]$Inflight.entertainment <- 4 
+#table(dane$On.board.service) #4 
+dane[is.na(dane$On.board.service)==T,]$On.board.service <- 4 
+#table(dane$Leg.room.service) #4 
+dane[is.na(dane$Leg.room.service)==T,]$Leg.room.service <- 4 
+#table(dane$Baggage.handling) #4 
+dane[is.na(dane$Baggage.handling)==T,]$Baggage.handling <- 4 
+#table(dane$Checkin.service) #4 
+dane[is.na(dane$Checkin.service)==T,]$Checkin.service <- 4 
+#table(dane$Inflight.service) #4 
+dane[is.na(dane$Inflight.service)==T,]$Inflight.service <- 4 
+#table(dane$Cleanliness) #4 
+dane[is.na(dane$Cleanliness)==T,]$Cleanliness <- 4  
+
+#mediana 
+dane[is.na(dane$Age)==T,]$Age <- median(dane$Age, na.rm = T) 
+dane[is.na(dane$Flight.Distance)==T,]$Flight.Distance <- median(dane$Flight.Distance, na.rm = T) 
+dane[is.na(dane$Departure.Delay.in.Minutes)==T,]$Departure.Delay.in.Minutes <- median(dane$Departure.Delay.in.Minutes, na.rm = T) 
+dane[is.na(dane$Arrival.Delay.in.Minutes)==T,]$Arrival.Delay.in.Minutes <- median(dane$Arrival.Delay.in.Minutes, na.rm = T)
+
+dane2 <- bind_cols(dane[,c(1:2,4:5,7:20,23)], dane2)
+sum(is.na(dane)) #mediana + jakosciowe
+sum(is.na(dane2)) #knn + jakosciowe
+```
+
+### Wartości odstające
+
+W tej części badania zostaną zbadane oraz zidentyfikowane wartości odstające.
+
+Za pomocą funkcji `nearZeroVar()` zidentyfikować można predyktory, które mają bardzo mało unikalnych wartości w stosunku do ich liczby, a stosunek częstotliwości najczęściej występującej wartości do częstotliwości drugiej najczęściej występującej wartości jest duży.
+
+```{r}
+nearZeroVar(dane)
+dane[,c(21,22)] |> head() |> kable() |> kable_styling(full_width = F)
+```
+
+Tutaj takimi predyktorami są zmienne `Departure.Delay.in.Minutes` oraz `Arrival.Delay.in.Minutes`.
+
+```{r}
+dane |> 
+  select(where(is.numeric)) |> 
+  findLinearCombos()
+```
+
+Brak jest również w tym zbiorze danych kombinacji liniowych pomiędzy predyktorami.
+
+Poniżej przedstawiono wykresy ramka-wąsy dla zmiennych numerycznych w tym zbiorze.
+
+```{r}
+dane |> 
+  select(c("Age", "Flight.Distance", "Departure.Delay.in.Minutes", "Arrival.Delay.in.Minutes")) |> 
+  pivot_longer(cols = everything()) |> 
+  ggplot(aes(value, fill = name)) +
+  geom_boxplot()+
+  facet_wrap(~name, scales = "free")+
+  labs(title = "Wykresy ramka-wąsy zmiennych numerycznych \nw zbiorze danych",
+       x = "Wartość")+
+  theme(legend.position = "none")
+```
+
+Zauważyć można niesymetryczność rozkładów niektórych zmiennych, które były widoczne także na poprzednich wizualizacjach. Widać także dużo obserwacji, które zostały sklafyfikowane jako odstające na podstawie zasady rozstępu ćwiartkowego.
+
+Teraz, za pomocą funkcji `identify_outliers()`, zidentyfukowane zostaną wartości odstające.
+
+```{r echo=FALSE, include=FALSE}
+dane[,c(1:2,4:5,7:20,23)] <- apply(X = dane[,c(1:2,4:5,7:20,23)], MARGIN = 2, FUN = as.numeric)
+for(i in 1:ncol(dane)){
+  ifelse(is.character(dane[,i])==T, dane[,i] <- as.factor(dane[,i]), dane[,i] <- dane[,i])
+}
+identify_outliers(dane, colnames(dane)[1])[identify_outliers(dane, colnames(dane)[1])$is.extreme,] |> nrow()#Gender - brak
+identify_outliers(dane, colnames(dane)[2])[identify_outliers(dane, colnames(dane)[2])$is.extreme==T,] |> nrow( )#Customer.Type 18907 + wszystkie ekstremalne
+identify_outliers(dane, colnames(dane)[3]) |> nrow() #Age - brak
+identify_outliers(dane, colnames(dane)[4]) |> nrow() #Type.of.Travel - brak
+identify_outliers(dane, colnames(dane)[5]) |> nrow() #Class - brak
+identify_outliers(dane, colnames(dane)[6]) |> nrow() #Flight.Distance 2329; brak ekstremalnych
+identify_outliers(dane, colnames(dane)[7]) |> nrow() #Inflight.wifi.service - brak
+identify_outliers(dane, colnames(dane)[8]) |> nrow() #Departure.Arrival.time.convenient - brak
+identify_outliers(dane, colnames(dane)[9]) |> nrow() #Ease.of.Online.booking - brak
+identify_outliers(dane, colnames(dane)[10]) |> nrow() #Gate.location - brak
+identify_outliers(dane, colnames(dane)[11]) |> nrow() #Food.and.drink - brak
+identify_outliers(dane, colnames(dane)[12]) |> nrow() #Online.boarding - brak
+identify_outliers(dane, colnames(dane)[13]) |> nrow() #Seat.comfort - brak
+identify_outliers(dane, colnames(dane)[14]) |> nrow() #Inflight.entertainment - brak
+identify_outliers(dane, colnames(dane)[15]) |> nrow() #On.board.service - brak
+identify_outliers(dane, colnames(dane)[16]) |> nrow() #Leg.room.service - brak
+identify_outliers(dane, colnames(dane)[17]) |> nrow() #Baggage.handling - brak
+identify_outliers(dane, colnames(dane)[18])[identify_outliers(dane, colnames(dane)[18])$is.extreme==T,] |> nrow()#Checkin.service - brak
+identify_outliers(dane, colnames(dane)[19]) |> nrow() #Inflight.service - brak
+identify_outliers(dane, colnames(dane)[20]) |> nrow() #Cleanliness - brak
+identify_outliers(dane, colnames(dane)[21])[identify_outliers(dane, colnames(dane)[21])$is.extreme==T,] |> nrow()#Departure.Delay.in.Minutes 9276 + extreme
+identify_outliers(dane, colnames(dane)[22])[identify_outliers(dane, colnames(dane)[22])$is.extreme==T,] |> nrow() #Arrival.Delay.in.Minutes 8618 + extreme
+identify_outliers(dane, colnames(dane)[23]) |> nrow() #satisfaction - brak
+```
+
+Obserwacje zidentyfikowane jako odstające pochodzą ze zmiennych `Arrival.Delay.in.Minutes` - 8618, `Departure.Delay.in.Minutes` - 9276, `Flight.Distance` - 2329, `Customer.Type` - 18907. Łącznie zatem takich obserwacji jest niemal 40 tysięcy. Niepoprawnym byłoby usunięcie wszystkich tych obserwacji, ponieważ stanowią one znaczną część załego zbioru danych. Na ten moment decyduję się na nie podejmowanie żadnych kroków pod tym względem.
+
+W związku z tym, że około 40% zbioru zostało zakwalifikowane jako wartości odstające, a imputacja braków danych medianą jest odporna na wartości odstające, pokazuje to dobry wybór co do właśnie tej metody imputacji.
+
+```{r echo=FALSE, include=FALSE}
+#Jeśli rozkład danych jest prawostronnie asymetryczny, stosowanie pierwiastkowania pierwiastkiem stopnia drugiego lub trzeciego lub logarytmowanie
+#Jeśli rozkład danych jest lewostronnie asymetryczny, złożenie w/w transformacji z transformacją (stała-x)
+
+#prawostronna asymetria: "Flight.Distance", "Departure.Delay.in.Minutes", "Arrival.Delay.in.Minutes"
+#hist(dane$Flight.Distance, breaks = 30)
+#hist(dane$Flight.Distance^(1/3), breaks = 30) #<----
+#hist(dane$Flight.Distance^(1/2), breaks = 30)
+#hist(log(dane$Flight.Distance), breaks = 30)
+
+#hist(dane$Departure.Delay.in.Minutes, breaks = 30)
+#hist(log(dane$Departure.Delay.in.Minutes), breaks = 30) #<----
+
+#hist(dane$Arrival.Delay.in.Minutes, breaks = 30)
+#hist(log(dane$Arrival.Delay.in.Minutes), breaks = 30) #<----
+
+#####outliers jeszcze w Customer.Type i Checkin.Service <------------
+#-- ale jest ich b. dużo w porównaniu do całego zbioru, więc nic nie będę robić
+```
+
+## Dodatkowe wizualizacje
+
+```{r}
+plot(density(dane$Age[dane$satisfaction==1], na.rm = T), col="#ee5e5e", main="Rozkład wieku pasażerów w podziale \nna poziom satysfakcji")
+lines(density(dane$Age[dane$satisfaction==0], na.rm = T), col="#7777D9")
+legend("topright", legend=c("neutral or dissatisfied", "satisfied"), col=c("#7777D9", "#ee5e5e"), lty=1, cex = 0.7)
+```
+
+Na podstawie tego wykresu można powiedzieć, że najczęściej usatysfakcjonowane były osoby starsze (w wieku 40-60 lat). Drugą grupę w znacznej mierze reprezentują pasażerowanie w wieku 20-40 lat.
+
+```{r}
+par(mar=c(5.1, 5.1, 5.1, 10), xpd=TRUE)
+ptab <- prop.table(table(dane$Gender, dane$satisfaction), margin = 2)
+ptab <- round(ptab, 3)*100
+bar <- barplot(ptab, col=c('#00FFFF','#FF2040'), main=paste("Procentowy rozkład płci w podziale \nna poziom satysfakcji"), xlab="satisfaction", ylab="%")
+legend("topright", legend=c("kobieta","mężczyzna"), fill=c('#FF2040', '#00FFFF'), inset=c(-0.5,0), cex = 0.7)
+barlabels(bar,ptab)
+```
+
+Wśród badanych pasażerów, zarówno w grupie usatysfakcjonowanych, jak i neutralnych lub nieusatysfakcjonowanych, podział płci był rówomiernie rozłożony.
+
+```{r echo=FALSE, include=FALSE}
+plot_ly(dane, x = ~Age, color = ~as.factor(Class)) |> 
+  add_histogram(xbins = list(size=5))
+
+dane |> 
+plot_ly(x = ~Age, y = ~as.factor(satisfaction), color = ~as.factor(Class)) |> 
+  add_bars() |> 
+  layout(barmode = "stack")
+
+dane |> 
+plot_ly(x = ~Flight.Distance, y = ~as.factor(satisfaction), color = ~as.factor(Class)) |> 
+  add_bars(orientation="v") |> 
+  layout(barmode = "stack")
+```
+
+```{r}
+ggplot(dane, aes(x = Age, fill = as.factor(Class))) + 
+  geom_histogram(col='gray40')+
+  labs(fill = "Klasa podróży", x = "Wiek", y = "Liczebność", title = "Histogram wieku pasażerów \nw podziale na klasę podróży")+
+  scale_fill_manual(values = c('lightblue', 'steelblue', 'darkblue'), labels = c("Eco", "Eco Plus","Business"))+
+  theme_bw()
+```
+
+Na podstawie powyższego wykresu można powiedzieć, że największym zainteresowaniem w każdej grupie wiekowej cieszyła się klasa Eco. Klasy Bisuness oraz Eco Plus wybierała podobna liczba pasażerów.
+
+## Przygotowanie danych do budowy modelu
+
+#### Wybór danych do modelu
+
+Należy uwzględnić predyktory, które są silnie skorelowane ze zmienną docelową i nie są skorelowane ze sobą.
+
+```{r echo=FALSE}
+#Zmienne silnie skorelowane ze zmienną zależną: Type.of.Travel, Class, Online.boarding, Inflight.entertainment.
+#Zmienne słabo skorelowane ze sobą: Gender, Customer.Type, Age, Flight.Distance, Leg.room.service, Checkin.service nie jest z niczym skorelowana (lub słabo).
+#Departure.Delay i Arrival.Delay tylko ze sobą, niczym poza
+#* Type.of.Travel jest skorelowane z Class
+#* Class z FLight.Distance (średnio)
+#* Inflight.wifi.service z Ease.of.Online.booking oraz z Online.boarding
+#* Departure.Arrival.time.convetnient z Ease.of.Online.booking i Gate.location (śrendio)
+#* Food.and.drink z Seat.comfort, Inflight.entertainment oraz Cleanliness
+#* On.board.service z Baggage.handling
+#z powyższych zależności wnioskuję o tym, aby żadnej zmiennej nie pomijać w modelu
+```
+
+Na ten moment decyduję się na nie uwzględnienie w modelu zmiennej `Departure.Delay.in.Minutes`, ponieważ była ona bardzo silnie skorelowana ze zmienną `Arrival.Delay.in.Minutes`.
+
+```{r}
+dane <- dane[,-21]
+```
+
+#### Preprocessing
+
+W kolejnych korkach preprocessingu podzielimy dane na zbiór uczący i testowy, dokonamy transformacji rozkładów predyktorów do rozkładu normalnego oraz normalizacji predyktorów. Ponieważ planuję sprawdzić różne modele, a każdy z nich wymaga nieco innego preprocessingu, to przygotuję różne formuły transformacji danych - odpowiednie dla poszczególnych modeli.
+
+```{r}
+dane_cat <- dane |> select(-c("Age", "Flight.Distance", "Arrival.Delay.in.Minutes")) |> lapply(as.factor)
+dane_num <- dane |> select(c("Age", "Flight.Distance", "Arrival.Delay.in.Minutes"))
+dane <- bind_cols(dane_cat, dane_num)
+
+dane2_cat <- dane2 |> select(-c("Age", "Flight.Distance", "Arrival.Delay.in.Minutes")) |> lapply(as.factor)
+dane2_num <- dane2 |> select(c("Age", "Flight.Distance", "Arrival.Delay.in.Minutes"))
+dane2 <- bind_cols(dane2_cat, dane2_num)
+
+#podziały zbiorów na uczące i testowe
+split1 <- initial_split(dane, prop = 0.7, strata = "satisfaction")
+dt_train1 <- training(split1)
+dt_test1 <- testing(split1)
+
+split2 <- initial_split(dane2, prop = 0.7, strata = "satisfaction")
+dt_train2 <- training(split2)
+dt_test2 <- testing(split2)
+
+#przepisy
+base_rec1 <- recipe(satisfaction ~ ., data = dt_train1)
+base_rec2 <- recipe(satisfaction ~ ., data = dt_train2)
+
+rec_null1 <- base_rec1 |> 
+  step_dummy(all_factor_predictors())
+#do base model nie potrzeba nic więcej
+
+rec_norm1 <- base_rec1 |> 
+  step_best_normalize(all_numeric_predictors()) |> 
+  step_normalize(all_numeric_predictors())
+
+rec_null2 <- base_rec2 |> 
+  step_dummy(all_factor_predictors())
+
+rec_norm2 <- base_rec2 |> 
+  step_best_normalize(all_numeric_predictors()) |> 
+  step_normalize(all_numeric_predictors())
+```
+
+## Budowa modeli
+
+Najpierw wyznaczymy tzw. model bazowy. Używa się go do sprawdzenia, czy modele uczenia maszynowego faktycznie przewyższają dopasowaniem model bazowy. Tylko wtedy warto je rozważać.
+
+Do oceny jakości dopasowania użyjemy dwóch miar *accuracy* oraz *specificity*. Oceny dopasowania dokonamy z wykorzystaniem sprawdzianu krzyżowego 5-krotnego bez powtórzeń.
+
+```{r}
+folds1 <- vfold_cv(dt_train1, v = 5)
+folds2 <- vfold_cv(dt_train2, v = 5)
+
+metrics <- metric_set(accuracy, spec)
+
+null_regression <- parsnip::null_model() |> 
+  set_engine("parsnip") |> 
+  set_mode("classification")
+
+null_wf1 <- workflow() |> 
+  add_recipe(rec_null1) |> 
+  add_model(null_regression)
+
+null_wf2 <- workflow() |> 
+  add_recipe(rec_null2) |> 
+  add_model(null_regression)
+
+null_res1 <- fit_resamples(null_wf1, resamples = folds1, metrics = metrics)
+null_res2 <- fit_resamples(null_wf2, resamples = folds2, metrics = metrics)
+collect_metrics(null_res1) |> kable() |> kable_styling(full_width = F)
+collect_metrics(null_res2) |> kable() |> kable_styling(full_width = F)
+```
+
+Na ten moment średnie wyniki miary *accuracy* dla obu wariantów danych (różne metody imputacji braków danych) dla modelu bazowego wynoszą około 57%.
+
+Zbudowane teraz zostaną różne modele - lasu losowego, drzewa decyzyjnego, modelu $k$-najbliższych sąsiadów, regresji logistycznej, modelu SVM oraz sieci neuronowej.
+
+```{r}
+neural_model <- mlp() |> 
+  set_engine("nnet") |> 
+  set_mode("classification")
+
+svm_model <- svm_rbf() |> 
+  set_engine("kernlab") |> 
+  set_mode("classification")
+
+logreg_model <- logistic_reg() |> 
+  set_engine("glm") |> 
+  set_mode("classification")
+
+rpart_model <-decision_tree() |>  
+   set_engine("rpart") |> 
+   set_mode("classification")
+
+rf_model <- rand_forest() |> 
+  set_engine("ranger") |> 
+  set_mode("classification")
+
+knn_model <- nearest_neighbor(neighbors = 5) |> 
+  set_engine('kknn') |> 
+  set_mode('classification')
+
+models <- workflow_set(preproc = list(rec_norm1, rec_norm2), 
+                       models = list(svm = svm_model, rf=rf_model, knn=knn_model, rpart=rpart_model, logreg=logreg_model, neural=neural_model), cross = T)
+models
+```
+
+Dopasowanie do zbioru treningowego:
+
+```{r eval=FALSE, include=FALSE}
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+models1 <- models |>  
+  workflow_map("fit_resamples", 
+               verbose = TRUE,
+               resamples = folds1,
+               metrics = metrics)
+```
+
+```{r echo=FALSE}
+#saveRDS(models1, "C:\\Users\\wnadw\\Desktop\\models1.rds")
+models1 <- readRDS("C:\\Users\\wnadw\\Desktop\\Foldery\\Pliki studia\\KNUM\\konkurs bootcamp\\models1.rds")
+models2 <- readRDS("C:\\Users\\wnadw\\Desktop\\Foldery\\Pliki studia\\KNUM\\konkurs bootcamp\\models2.rds")
+```
+
+```{r eval=FALSE, include=FALSE}
+models2 <- models |>  
+  workflow_map("fit_resamples", 
+               verbose = TRUE,
+               resamples = folds2,
+               metrics = metrics)
+stopCluster(cl)
+```
+
+```{r echo=FALSE}
+#saveRDS(models2, "C:\\Users\\wnadw\\Desktop\\models2.rds")
+```
+
+```{r}
+collect_metrics(models1)
+collect_metrics(models2)
+```
+
+Najlepsze wartości dopasowania uzyskał model lasu losowego (96% miary *accuracy*). Na bardzo zbliżonym poziomie do tego pozostały także wyniki modelu SVM. Warto również zaznaczyć, że przewyższają one zdecydowanie jakością dopasowania model bazowy.
+
+Należy także zwrócić uwagę, że wyniki `models2` oparte są na zestawie danych, gdzie metodą imputacji braków danych była metoda 5-najbliższych sąsiadów. Wyniki dla dopasowania modeli dla tych danych wypadają bardzo podobnie do tych, gdzie braki danych były uzupełniane medianą. Różnice są na 3. miejscu po przecinku (z przewagą dla metody uzupełniania bd medianą).
+
+#### Tuning modeli
+
+W tej części pracy przeprowadzona zostanie optymalizacja parametrów najlepszego modelu. Do optymalizacji zostanie wykorzystana metoda przeszukiwania siatki. Tuningowany będzie model lasu losowego. Od tej pory będziemy też pracować tylko na zbiorze `dane`, gdzie imputacja braków danych przebiegała z użyciem mediany.
+
+```{r}
+rf <- rand_forest(mode = "classification",
+                  engine = "ranger", 
+                  mtry = tune(), 
+                  trees = tune(), 
+                  min_n = tune())
+rf_param <- extract_parameter_set_dials(rf)
+rf_param
+
+rf_param <- finalize(rf_param, dt_train1)
+rf_param
+```
+
+```{r}
+rf_wf <- workflow() |> 
+  add_recipe(rec_norm1) |> 
+  add_model(rf)
+```
+
+```{r eval=FALSE, include=FALSE}
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+rf_search <- rf_wf |> 
+  tune_grid(resamples = folds1, metrics = metrics)
+
+stopCluster(cl)
+```
+
+```{r echo=FALSE}
+#saveRDS(rf_search, "C:\\Users\\wnadw\\Desktop\\rf_search.rds")
+```
+
+```{r echo=FALSE}
+rf_search <- readRDS("C:\\Users\\wnadw\\Desktop\\Foldery\\Pliki studia\\KNUM\\konkurs bootcamp\\rf_search.rds")
+```
+
+```{r}
+autoplot(rf_search, type = 'marginals', metric = 'accuracy')
+```
+
+```{r}
+show_best(rf_search, metric = "accuracy")
+```
+
+W wyniku przeszukiwania siatki, otrzymano 5 propozycji optymalnych hiperparametrów modelu lasu losowego; każda z nich ma średnią miarę *accuracy* wynoszącą 0,96.
+
+#### Ocena dopasowania modelu końcowego
+
+Jako najlepsze hiperparametry modelu zostaną wybrane te na pozycji pierwszej.
+
+```{r}
+best_params <- select_best(rf_search, metric = "accuracy")
+
+final_wf <- rf_wf |> 
+  finalize_workflow(best_params) 
+
+final_wf
+```
+
+Dopasowanie do zbioru testowego.
+
+```{r}
+final_fit <- final_wf |> 
+  last_fit(split1)
+
+final_fit$.metrics
+```
+
+Dopasowanie do danych testowych na podstawie miary *accuracy* wynosi 0,96. Pole pod krzywą ROC wynosi niemal 1.
+
+```{r}
+final_fit$.predictions[[1]]  |> 
+  roc_curve(truth = satisfaction, .pred_0) |> 
+  autoplot()
+```
+
+Poniżej przedstawiono macierz klasyfikacji.
+
+```{r}
+final_fit$.predictions[[1]] |> 
+  conf_mat(truth = satisfaction, estimate = .pred_class)
+```
+
+## Podsumowanie
+
+Model lasu losowego ze stuningowanymi hiperparametrami poskutkował 96% dopasowaniem do danych testowych. Na przyszłość można rozważyć także tuning pozostałych równie dobrze dopasowanych modeli, który nie został tutaj wdrożony.
